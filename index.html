@@ -1,0 +1,1260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>极简塔防</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; background: #14141c; overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  #stage { display: block; width: 100vw; height: 100vh; cursor: default; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<script>
+"use strict";
+/* ============================================================================
+ *  极简塔防
+ *  ---------------------------------------------------------------------------
+ *  24×24 网格，箭/冰/炮三种塔各 4 级，塔会挡路；敌人从 (0,12) 沿 BFS 最短路
+ *  走向 (23,12)。地图有预置的固定障碍迷宫（多条路线），玩家用塔继续造迷宫，
+ *  撑过 20 波。无音效。
+ *
+ *  模块：CONFIG / Tower / Enemy / Pathfinding / GameState / Renderer / Input / GameLoop。
+ *
+ *  坐标：世界坐标 960×880 等比缩放到窗口；格子边长 cell ∈ [16,32] 自适应；
+ *        板内坐标 = 24×24 格，(0,0) 左上，格中心 (cx+0.5, cy+0.5)。
+ * ========================================================================== */
+
+/* ============================== 1. CONFIG ============================== */
+const CONFIG = {
+  WORLD: { W: 960, H: 880 },
+
+  BOARD: {
+    N: 24,
+    MAX_CELL: 32, MIN_CELL: 16,
+    START: [0, 12], END: [23, 12],
+    GRID_LINE: 'rgba(255,255,255,0.12)',   // 可建造格子网格线
+    GRID_FILL: 'rgba(255,255,255,0.02)',   // 可建造格子极淡填充
+    OBSTACLE: '#444444',                    // 固定障碍方块
+    FORBIDDEN_FILL: 'rgba(0,0,0,0.30)',     // 起终点 3×3 禁建区暗色标记
+    // 固定障碍布局（离线生成并验证：29.3% 密度、≥8 条路径、起终点 3×3 全空）
+    OBSTACLES: [
+      [0,0], [4,0], [6,0], [10,0], [11,0], [12,0], [13,0], [14,0], [15,0], [19,0], [0,1], [2,1], [4,1], [6,1], [8,1], [19,1],
+      [21,1], [23,1], [0,2], [2,2], [4,2], [6,2], [8,2], [12,2], [13,2], [14,2], [15,2], [19,2], [21,2], [23,2], [0,3], [2,3],
+      [4,3], [8,3], [17,3], [19,3], [21,3], [23,3], [0,4], [2,4], [8,4], [11,4], [12,4], [13,4], [14,4], [15,4], [17,4], [19,4],
+      [21,4], [23,4], [2,5], [8,5], [17,5], [23,5], [0,6], [2,6], [11,6], [12,6], [13,6], [0,7], [21,7], [0,8], [2,8], [6,8],
+      [7,8], [8,8], [9,8], [10,8], [14,8], [15,8], [16,8], [17,8], [18,8], [21,8], [23,8], [2,9], [21,9], [23,9], [2,10], [8,10],
+      [21,10], [23,10], [2,11], [4,11], [5,11], [6,11], [8,11], [13,11], [19,11], [21,11], [8,12], [10,12], [13,12], [17,12], [19,12], [10,13],
+      [13,13], [17,13], [19,13], [0,14], [3,14], [7,14], [10,14], [13,14], [15,14], [17,14], [19,14], [0,15], [3,15], [7,15], [10,15], [15,15],
+      [17,15], [19,15], [0,16], [3,16], [7,16], [10,16], [15,16], [17,16], [19,16], [21,16], [22,16], [23,16], [7,17], [10,17], [15,17], [1,18],
+      [2,18], [3,18], [4,18], [5,18], [8,19], [10,19], [18,19], [6,20], [8,20], [10,20], [12,20], [13,20], [14,20], [18,20], [20,20], [21,20],
+      [22,20], [23,20], [0,21], [6,21], [8,21], [10,21], [18,21], [0,22], [2,22], [3,22], [4,22], [6,22], [8,22], [10,22], [18,22], [20,22],
+      [21,22], [22,22], [0,23], [6,23], [10,23], [12,23], [13,23], [14,23], [18,23]
+    ]
+  },
+
+  LAYOUT: { HUD_H: 64, HINT_H: 40, PAD: 16 },
+
+  COLOR: {
+    BG: '#1e1e28',
+    START: '#4ade80', END: '#fbbf24',
+    ENEMY: '#ff4a4a', ENEMY_SLOWED: '#88ddff',
+    TEXT: '#ffffff', TEXT_DIM: '#ffffff',   // 所有文字统一纯白
+    HINT: '#ffffff',
+    BUTTON: '#2c2c3a', BUTTON_HOVER: '#3a3a4c', BUTTON_DISABLED: '#23232c',
+    FROST: 'rgba(136,221,255,',               // 冰霜光环/扩散，拼接 alpha
+    ROUTE: [                                    // 多条路径颜色：白/黄/青/紫
+      'rgba(255,255,255,0.38)',
+      'rgba(255,214,90,0.38)',
+      'rgba(90,214,255,0.38)',
+      'rgba(196,136,255,0.38)'
+    ],
+    ARROW: '#ffffff',
+    GAIN: '#ffffff'
+  },
+
+  TOWER_SIZE: 20,        // 塔方形名义尺寸（占满格子，取 cell-4 与它的小值）
+  BULLET: { arrow: 0.15, ice: 0.25, cannon: 0.40 },
+
+  ECONOMY: { KILL_REWARD: 5, REFUND_RATIO: 0.5 },
+
+  WAVES: {
+    COUNT: 20, INTERVAL: 30,
+    EARLY_REWARD_PER_SEC: 2,
+    SPAWN_INTERVAL: 0.5,
+    ENEMY_SPEED: 1
+  },
+
+  ENEMY_R: 6,
+  RANGE_FILL: 'rgba(255,255,255,0.08)',
+  RANGE_STROKE: 'rgba(255,255,255,0.25)',
+
+  DIFFICULTIES: {
+    easy:     { name: '简单', lives: 10, gold: 400, hpBase: 25, hpMul: [1.10, 1.15, 1.18, 1.20], countBase: 3, countPerWave: 1 },
+    hard:     { name: '困难', lives: 5,  gold: 300, hpBase: 40, hpMul: [1.20, 1.22, 1.25, 1.28], countBase: 4, countPerWave: 2 },
+    hardcore: { name: '硬核', lives: 1,  gold: 250, hpBase: 50, hpMul: [1.25, 1.28, 1.32, 1.35], countBase: 5, countPerWave: 2 }
+  }
+};
+
+/* ============================== 塔属性表 ==============================
+ * 每塔 4 级（基础 + 升级 1/2/3）。range 是塔的固定射程（箭 3 / 冰 2.5 / 炮 4），
+ * 不再随等级增长；damage/cooldown/slow/splash 按等级变化。
+ * ====================================================================== */
+const TOWER_TYPES = {
+  arrow: {
+    name: '箭塔', color: '#4a9eff', baseCost: 30,
+    levels: [
+      { damage: 20, range: 3.0, cooldown: 0.8 },
+      { damage: 35, range: 3.5, cooldown: 0.7, upCost: 40 },
+      { damage: 55, range: 4.0, cooldown: 0.6, upCost: 60 },
+      { damage: 80, range: 4.5, cooldown: 0.5, upCost: 80 }
+    ]
+  },
+  ice: {
+    name: '冰塔', color: '#4affd4', baseCost: 40,
+    levels: [
+      { damage: 5,  range: 2.5, cooldown: 1.0, slow: 0.5,  slowDur: 1.5 },
+      { damage: 10, range: 3.0, cooldown: 0.9, slow: 0.55, slowDur: 2.0, upCost: 50 },
+      { damage: 15, range: 3.8, cooldown: 0.8, slow: 0.6,  slowDur: 2.5, upCost: 70 },
+      { damage: 25, range: 4.5, cooldown: 0.7, slow: 0.7,  slowDur: 3.0, upCost: 90 }
+    ]
+  },
+  cannon: {
+    name: '炮塔', color: '#ff6b4a', baseCost: 50,
+    levels: [
+      { damage: 15, range: 4.0, cooldown: 1.5, splash: 1.0 },
+      { damage: 25, range: 4.0, cooldown: 1.4, splash: 1.5, upCost: 60 },
+      { damage: 40, range: 4.5, cooldown: 1.2, splash: 1.5, upCost: 80 },
+      { damage: 60, range: 5.0, cooldown: 1.0, splash: 2.0, upCost: 100 }
+    ]
+  }
+};
+const TOWER_KEYS = Object.keys(TOWER_TYPES);
+const MAX_LEVEL = 3;
+const N = CONFIG.BOARD.N;
+
+/* 分段难度曲线：每 5 波一段共 4 段，血量/数量都随难度变化 */
+function waveSegment(w) { return w <= 5 ? 0 : w <= 10 ? 1 : w <= 15 ? 2 : 3; }
+function hpFor(diff, w) {
+  const d = CONFIG.DIFFICULTIES[diff];
+  return Math.round(d.hpBase * Math.pow(d.hpMul[waveSegment(w)], w - 1));
+}
+function countFor(diff, w) {
+  const d = CONFIG.DIFFICULTIES[diff];
+  return d.countBase + w * d.countPerWave;
+}
+
+/* 起点三个出发方向（上/下/右；左边是棋盘边缘不可走） */
+const START_DIRECTIONS = {
+  up:   { cell: [0, 11], label: '上' },
+  down: { cell: [0, 13], label: '下' },
+  right:{ cell: [1, 12], label: '右' }
+};
+const DIR_ORDER = ['up', 'down', 'right'];
+
+/* ============================== 通用工具 ============================== */
+const clamp = (v, a, b) => (v < a ? a : (v > b ? b : v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+
+function roundRect(c, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  c.beginPath();
+  c.moveTo(x + rr, y);
+  c.arcTo(x + w, y, x + w, y + h, rr);
+  c.arcTo(x + w, y + h, x, y + h, rr);
+  c.arcTo(x, y + h, x, y, rr);
+  c.arcTo(x, y, x + w, y, rr);
+  c.closePath();
+}
+
+/* 固定障碍的预计算（寻路/建造/绘制都要查） */
+const OBSTACLE_SET = new Set(CONFIG.BOARD.OBSTACLES.map(o => o[0] + ',' + o[1]));
+const OBSTACLE_BLOCKED = new Uint8Array(N * N);
+for (const [x, y] of CONFIG.BOARD.OBSTACLES) OBSTACLE_BLOCKED[y * N + x] = 1;
+
+/* 起点/终点周围 3×3 禁建区（也禁放障碍） */
+function inForbiddenZone(x, y) {
+  return (Math.abs(x - 0) <= 1 && Math.abs(y - 12) <= 1) ||
+         (Math.abs(x - 23) <= 1 && Math.abs(y - 12) <= 1);
+}
+
+/* ============================== 2. Tower ==============================
+ * 塔负责造价/升级/拆除返还/属性/开火。开火不再即时结算，而是发射一颗"子弹"，
+ * 子弹飞行到目标后再结算伤害/减速/溅射（见 GameState.updateProjectiles）。
+ * 单体塔（箭/冰）按"最先进入射程"（FIFO）选目标，炮塔选溅射收益最高落点。
+ * ====================================================================== */
+const Tower = {
+  create(typeKey, cell) {
+    return { type: typeKey, cell: cell.slice(), level: 0, cooldown: 0 };
+  },
+
+  stats(tower) { return TOWER_TYPES[tower.type].levels[tower.level]; },
+
+  upgradeCost(tower) {
+    if (tower.level >= MAX_LEVEL) return Infinity;
+    return TOWER_TYPES[tower.type].levels[tower.level + 1].upCost;
+  },
+
+  refundValue(tower) {
+    const t = TOWER_TYPES[tower.type];
+    let total = t.baseCost;
+    for (let lv = 1; lv <= tower.level; lv++) total += t.levels[lv].upCost;
+    return Math.round(total * CONFIG.ECONOMY.REFUND_RATIO);
+  },
+
+  upgrade(tower) {
+    if (tower.level >= MAX_LEVEL) return false;
+    tower.level++; tower.cooldown = 0;
+    return true;
+  },
+
+  /** 发射子弹。单体塔追踪目标敌人，炮塔落向固定点。 */
+  fire(tower, st, target) {
+    const from = { x: tower.cell[0], y: tower.cell[1] };
+    if (tower.type === 'cannon') {
+      GameState.projectiles.push({
+        type: 'cannon', from, to: target, t: 0, dur: CONFIG.BULLET.cannon,
+        damage: st.damage, splash: st.splash
+      });
+    } else {
+      GameState.projectiles.push({
+        type: tower.type, from, enemy: target, t: 0, dur: CONFIG.BULLET[tower.type],
+        damage: st.damage, slow: st.slow || 0, slowDur: st.slowDur || 0
+      });
+    }
+  },
+
+  /** 选目标：射程内"离终点剩余路径距离最短"的敌人（最接近终点的） */
+  findTarget(tower, st) {
+    const cx = tower.cell[0], cy = tower.cell[1];
+    let best = null, bestDist = Infinity;
+    for (const e of GameState.enemies) {
+      if (!e.alive || e.reached) continue;
+      const p = Enemy.pos(e);
+      if (dist(cx, cy, p.x, p.y) > st.range) continue;
+      const d = Enemy.remainingDistance(e);
+      if (d < bestDist) { bestDist = d; best = e; }
+    }
+    return best;
+  },
+
+  update(tower, dt) {
+    const st = this.stats(tower);
+    tower.cooldown -= dt;
+    if (tower.cooldown > 0) return;
+    const target = this.findTarget(tower, st);
+    if (!target) return;
+    // 炮塔以目标位置为溅射落点，单体塔追踪该目标
+    this.fire(tower, st, tower.type === 'cannon' ? Enemy.pos(target) : target);
+    tower.cooldown = st.cooldown;
+  }
+};
+
+/* ============================== 3. Enemy ==============================
+ * 敌人沿 path 平滑移动（seg + t 插值）。塔布局变化时重寻路：不是瞬移到新路径，
+ * 而是 0.3s 平滑插值到新路径的最近格子，再继续走（避免"瞬移"和"走进死路"）。
+ * ====================================================================== */
+let _enemyId = 0;
+const Enemy = {
+  spawn(hp, path, dir) {
+    return {
+      id: ++_enemyId, path, dir, seg: 0, t: 0,
+      hp, maxHp: hp, slow: 0, slowT: 0,
+      alive: true, reached: false, transition: null,
+      pathVersion: GameState.pathVersion
+    };
+  },
+
+  pos(e) {
+    if (e.transition) {
+      const k = clamp(e.transition.t / e.transition.dur, 0, 1);
+      const s = easeOutCubic(k);
+      return { x: lerp(e.transition.from.x, e.transition.to.x, s), y: lerp(e.transition.from.y, e.transition.to.y, s) };
+    }
+    const a = e.path[e.seg];
+    const b = e.path[Math.min(e.seg + 1, e.path.length - 1)];
+    return { x: lerp(a[0], b[0], e.t), y: lerp(a[1], b[1], e.t) };
+  },
+
+  cellOf(e) {
+    if (e.transition) return e.transition.to;
+    if (e.t < 0.5) return e.path[e.seg];
+    return e.path[Math.min(e.seg + 1, e.path.length - 1)];
+  },
+
+  /** 到终点的剩余路径距离 = (path.length - 1 - progress) × 格子大小；
+   *  不在路径上（无路径 / 已到终点 / 平滑过渡中）返回 Infinity，即"永不优先"。 */
+  remainingDistance(e) {
+    if (!e.alive || e.reached || e.transition || !e.path || e.path.length < 2) return Infinity;
+    return (e.path.length - 1 - (e.seg + e.t)) * Renderer.cellSize();
+  },
+
+  move(e, dt) {
+    if (!e.alive || e.reached) return;
+    if (e.transition) {
+      e.transition.t += dt;
+      if (e.transition.t >= e.transition.dur) e.transition = null;
+      return;
+    }
+    const spd = CONFIG.WAVES.ENEMY_SPEED * (1 - (e.slowT > 0 ? e.slow : 0));
+    e.t += spd * dt;
+    while (e.t >= 1) {
+      if (e.seg >= e.path.length - 2) { e.reached = true; e.t = 1; break; }
+      e.seg++; e.t -= 1;
+    }
+    if (e.slowT > 0) { e.slowT -= dt; if (e.slowT <= 0) { e.slowT = 0; e.slow = 0; } }
+  },
+
+  applySlow(e, ratio, dur) { e.slow = Math.max(e.slow, ratio); e.slowT = Math.max(e.slowT, dur); },
+
+  damage(e, dmg) {
+    if (!e.alive) return;
+    e.hp -= dmg;
+    if (e.hp <= 0) { e.alive = false; GameState.onKill(e); }
+  }
+};
+
+/* ============================== 4. Pathfinding ==============================
+ * BFS。障碍 = 固定障碍 + 塔。canPlace 临时占格跑 BFS，无路则拒绝。
+ * ====================================================================== */
+const Pathfinding = {
+  makeBlocked(towers) {
+    const b = new Uint8Array(OBSTACLE_BLOCKED);   // 拷贝固定障碍
+    for (const t of towers) b[t.cell[1] * N + t.cell[0]] = 1;
+    return b;
+  },
+
+  bfsOn(blocked, start, end) {
+    const prev = new Int32Array(N * N).fill(-1);
+    const queue = [start[1] * N + start[0]];
+    prev[start[1] * N + start[0]] = -2;
+    const target = end[1] * N + end[0];
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    let head = 0;
+    while (head < queue.length) {
+      const cur = queue[head++];
+      if (cur === target) break;
+      const cx = cur % N, cy = (cur / N) | 0;
+      for (const [dx, dy] of dirs) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+        const ni = ny * N + nx;
+        if (prev[ni] !== -1 || blocked[ni]) continue;
+        prev[ni] = cur;
+        queue.push(ni);
+      }
+    }
+    if (prev[target] === -1) return null;
+    const path = [];
+    let c = target;
+    while (c !== -2) { path.push([c % N, (c / N) | 0]); c = prev[c]; }
+    path.reverse();
+    return path;
+  },
+
+  bfs(start, end) { return this.bfsOn(this.makeBlocked(GameState.towers), start, end); },
+
+  bfsFrom(cell, end) {
+    const b = this.makeBlocked(GameState.towers);
+    b[cell[1] * N + cell[0]] = 0;
+    return this.bfsOn(b, cell, end);
+  },
+
+  canPlace(cell, towers) {
+    const b = this.makeBlocked(towers);
+    b[cell[1] * N + cell[0]] = 1;
+    return this.bfsOn(b, CONFIG.BOARD.START, CONFIG.BOARD.END) !== null;
+  }
+};
+
+/* ============================== 5. GameState ==============================
+ * phase: 'MENU'(选难度) → 'PLAY' → 'WIN' / 'LOSE'；paused 只在 PLAY 有意义。
+ * 方向/路线：每个波次从起点三个方向（上/下/右）随机选一个，该波敌人沿对应路线走。
+ * 路线在布局变化后重算（pathVersion）。无敌人时显示下一波方向与路径预览。
+ * ====================================================================== */
+const GameState = {
+  phase: 'MENU', paused: false, difficulty: 'easy',
+  gold: CONFIG.DIFFICULTIES.easy.gold,
+  lives: CONFIG.DIFFICULTIES.easy.lives,
+  livesPulse: 0,
+  wave: 0, waveTimer: CONFIG.WAVES.INTERVAL,
+  spawnLeft: 0, spawning: false, spawnTimer: 0,
+  towers: [], enemies: [], projectiles: [], frosts: [], floaters: [],
+  toast: null, toastT: 0,
+  pathVersion: 0, time: 0,
+  hoverCell: null, menu: null,
+  nextDirection: 'right', waveDirection: null,
+  routes: { up: null, down: null, right: null }, _routesVersion: -1,
+
+  currentPath() { return Pathfinding.bfs(CONFIG.BOARD.START, CONFIG.BOARD.END); },
+  hpForWave(w) { return hpFor(this.difficulty, w); },
+  countForWave(w) { return countFor(this.difficulty, w); },
+
+  computeRoutes() {
+    const r = {};
+    for (const [dir, d] of Object.entries(START_DIRECTIONS)) {
+      const p = Pathfinding.bfsFrom(d.cell, CONFIG.BOARD.END);
+      r[dir] = p ? [[CONFIG.BOARD.START[0], CONFIG.BOARD.START[1]], ...p] : null;
+    }
+    return r;
+  },
+
+  start(difficulty) { this.difficulty = difficulty; this.restart(); },
+
+  restart() {
+    this.gold = CONFIG.DIFFICULTIES[this.difficulty].gold;
+    this.lives = CONFIG.DIFFICULTIES[this.difficulty].lives;
+    this.livesPulse = 0;
+    this.wave = 0; this.waveTimer = CONFIG.WAVES.INTERVAL;
+    this.spawnLeft = 0; this.spawning = false; this.spawnTimer = 0;
+    this.towers = []; this.enemies = []; this.projectiles = []; this.frosts = []; this.floaters = [];
+    this.toast = null;
+    this.pathVersion = 0; this.time = 0;
+    this.menu = null;
+    this.nextDirection = this.pickDirection();
+    this.waveDirection = null;
+    this.routes = this.computeRoutes(); this._routesVersion = 0;
+    this.phase = 'PLAY'; this.paused = false;
+  },
+
+  pickDirection() { return DIR_ORDER[Math.floor(Math.random() * DIR_ORDER.length)]; },
+
+  showToast(text) { this.toast = text; this.toastT = 0; },
+
+  canBuildAt(cell) {
+    if (!cell) return false;
+    const [x, y] = cell;
+    if (x < 0 || y < 0 || x >= N || y >= N) return false;
+    if (inForbiddenZone(x, y)) return false;
+    if (OBSTACLE_SET.has(x + ',' + y)) return false;
+    return !this.towers.some(t => t.cell[0] === x && t.cell[1] === y);
+  },
+
+  placeTower(typeKey, cell) {
+    if (!this.canBuildAt(cell)) return false;
+    const type = TOWER_TYPES[typeKey];
+    if (!type || this.gold < type.baseCost) return false;
+    if (!Pathfinding.canPlace(cell, this.towers)) {
+      this.showToast('放置后会堵死路径');
+      return false;
+    }
+    this.towers.push(Tower.create(typeKey, cell));
+    this.gold -= type.baseCost;
+    this.pathVersion++;
+    return true;
+  },
+
+  upgradeTower(tower) {
+    const cost = Tower.upgradeCost(tower);
+    if (tower.level >= MAX_LEVEL || this.gold < cost) return false;
+    this.gold -= cost;
+    Tower.upgrade(tower);
+    return true;
+  },
+
+  demolishTower(tower) {
+    this.gold += Tower.refundValue(tower);
+    this.towers = this.towers.filter(t => t !== tower);
+    this.pathVersion++;
+  },
+
+  spawnWave() {
+    this.wave++;
+    this.spawnLeft = this.countForWave(this.wave);
+    this.spawnTimer = 0;
+    this.spawning = true;
+    this.waveDirection = this.nextDirection;
+  },
+
+  callEarlyWave() {
+    if (this.spawning || this.wave >= CONFIG.WAVES.COUNT) return false;
+    const reward = Math.round(this.waveTimer * CONFIG.WAVES.EARLY_REWARD_PER_SEC);
+    this.gold += reward;
+    this.floaters.push({ text: '+' + reward, x: 84, y: 34, t: 0 });
+    this.spawnWave();
+    return true;
+  },
+
+  onKill(e) {
+    this.gold += CONFIG.ECONOMY.KILL_REWARD;
+    this.floaters.push({ text: '+' + CONFIG.ECONOMY.KILL_REWARD, x: 84, y: 34, t: 0 });   // 金币飘字固定显示在顶部金币旁
+  },
+
+  onReachEnd() {
+    this.lives--;
+    this.livesPulse = 1;   // 触发 ❤️×N 缩放动画
+    if (this.lives <= 0) { this.lives = 0; this.phase = 'LOSE'; }
+  },
+
+  addFrost(x, y) { this.frosts.push({ x, y, t: 0, dur: 0.3 }); },
+
+  mostAdvancedEnemy() {
+    let best = null, bp = -1;
+    for (const e of this.enemies) {
+      if (!e.alive || e.reached) continue;
+      if (e.seg + e.t > bp) { bp = e.seg + e.t; best = e; }
+    }
+    return best;
+  },
+
+  repathEnemy(e) {
+    const cell = Enemy.cellOf(e);
+    const np = Pathfinding.bfsFrom(cell, CONFIG.BOARD.END);
+    if (np && np.length >= 2) {
+      const from = Enemy.pos(e);
+      e.path = np; e.seg = 0; e.t = 0;
+      // 0.3s 平滑过渡到新路径最近格子，避免瞬移
+      if (dist(from.x, from.y, np[0][0], np[0][1]) > 0.01) {
+        e.transition = { from, to: { x: np[0][0], y: np[0][1] }, t: 0, dur: 0.3 };
+      }
+    }
+    e.pathVersion = this.pathVersion;
+  },
+
+  resolveProjectile(p) {
+    if (p.type === 'cannon') {
+      for (const e of this.enemies) {
+        if (!e.alive || e.reached) continue;
+        const q = Enemy.pos(e);
+        if (dist(p.to.x, p.to.y, q.x, q.y) <= p.splash) Enemy.damage(e, p.damage);
+      }
+    } else {
+      if (p.enemy.alive && !p.enemy.reached) {
+        if (p.type === 'ice') {
+          Enemy.applySlow(p.enemy, p.slow, p.slowDur);
+          const pos = Enemy.pos(p.enemy);
+          this.addFrost(pos.x, pos.y);
+        }
+        Enemy.damage(p.enemy, p.damage);
+      }
+    }
+  },
+
+  updateProjectiles(dt) {
+    for (const p of this.projectiles) {
+      p.t += dt;
+      if ((p.type === 'arrow' || p.type === 'ice')) {
+        if (!p.enemy.alive || p.enemy.reached) { p.done = true; continue; }
+        p.to = Enemy.pos(p.enemy);   // 追踪目标
+      }
+      if (p.t >= p.dur) { p.done = true; this.resolveProjectile(p); }
+    }
+    this.projectiles = this.projectiles.filter(p => !p.done);
+  },
+
+  update(dt) {
+    this.time += dt;
+    this.livesPulse = Math.max(0, this.livesPulse - dt * 2.5);
+    for (const f of this.floaters) f.t += dt;
+    this.floaters = this.floaters.filter(f => f.t < 0.5);
+    for (const f of this.frosts) f.t += dt;
+    this.frosts = this.frosts.filter(f => f.t < f.dur);
+    if (this.toast) { this.toastT += dt; if (this.toastT > 1.4) this.toast = null; }
+
+    if (this.phase !== 'PLAY' || this.paused) return;
+
+    // 路线缓存：布局变化时重算
+    if (this._routesVersion !== this.pathVersion) {
+      this.routes = this.computeRoutes();
+      this._routesVersion = this.pathVersion;
+    }
+
+    // 波次推进
+    if (this.spawning) {
+      this.spawnTimer -= dt;
+      if (this.spawnTimer <= 0 && this.spawnLeft > 0) {
+        const route = this.routes[this.waveDirection] || this.currentPath();
+        if (route) this.enemies.push(Enemy.spawn(this.hpForWave(this.wave), route, this.waveDirection));
+        this.spawnLeft--;
+        this.spawnTimer = CONFIG.WAVES.SPAWN_INTERVAL;
+      }
+      if (this.spawnLeft <= 0) {
+        this.spawning = false;
+        this.waveTimer = CONFIG.WAVES.INTERVAL;
+        this.nextDirection = this.pickDirection();   // 为下一波选方向
+      }
+    } else if (this.wave < CONFIG.WAVES.COUNT) {
+      this.waveTimer -= dt;
+      if (this.waveTimer <= 0) this.spawnWave();
+    }
+
+    // 敌人
+    for (const e of this.enemies) {
+      if (e.pathVersion !== this.pathVersion) this.repathEnemy(e);
+      Enemy.move(e, dt);
+      if (e.reached) this.onReachEnd();
+    }
+
+    // 塔攻击（发射子弹）
+    for (const t of this.towers) Tower.update(t, dt);
+
+    // 子弹飞行 + 结算
+    this.updateProjectiles(dt);
+
+    this.enemies = this.enemies.filter(e => e.alive && !e.reached);
+
+    if (this.wave >= CONFIG.WAVES.COUNT && !this.spawning && this.enemies.length === 0) this.phase = 'WIN';
+  }
+};
+
+/* ============================== 6. Renderer ==============================
+ * 全 UI canvas 绘制。ui() 返回交互热区，画与命中测试共用同一份坐标。
+ * ====================================================================== */
+const Renderer = {
+  canvas: null, ctx: null,
+  view: { scale: 1, ox: 0, oy: 0, dpr: 1 },
+
+  cellSize() {
+    const availW = CONFIG.WORLD.W - CONFIG.LAYOUT.PAD * 2;
+    const availH = CONFIG.WORLD.H - CONFIG.LAYOUT.HUD_H - CONFIG.LAYOUT.HINT_H - CONFIG.LAYOUT.PAD * 2;
+    return clamp(Math.floor(Math.min(availW, availH) / N), CONFIG.BOARD.MIN_CELL, CONFIG.BOARD.MAX_CELL);
+  },
+  origin() {
+    const c = this.cellSize(), size = c * N;
+    const band = CONFIG.WORLD.H - CONFIG.LAYOUT.HUD_H - CONFIG.LAYOUT.HINT_H;
+    return { x: (CONFIG.WORLD.W - size) / 2, y: CONFIG.LAYOUT.HUD_H + (band - size) / 2, c };
+  },
+  cellToPx(cx, cy) { const o = this.origin(); return { x: o.x + (cx + 0.5) * o.c, y: o.y + (cy + 0.5) * o.c }; },
+  pxToCell(wx, wy) {
+    const o = this.origin();
+    const cx = Math.floor((wx - o.x) / o.c), cy = Math.floor((wy - o.y) / o.c);
+    return (cx < 0 || cy < 0 || cx >= N || cy >= N) ? null : [cx, cy];
+  },
+  screenToWorld(clientX, clientY) {
+    const r = this.canvas.getBoundingClientRect();
+    return { x: (clientX - r.left - this.view.ox) / this.view.scale, y: (clientY - r.top - this.view.oy) / this.view.scale };
+  },
+
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = window.innerWidth, h = window.innerHeight;
+    this.canvas.width = Math.max(1, Math.floor(w * dpr));
+    this.canvas.height = Math.max(1, Math.floor(h * dpr));
+    this.canvas.style.width = w + 'px';
+    this.canvas.style.height = h + 'px';
+    const s = Math.min(w / CONFIG.WORLD.W, h / CONFIG.WORLD.H);
+    this.view = { scale: s, ox: (w - CONFIG.WORLD.W * s) / 2, oy: (h - CONFIG.WORLD.H * s) / 2, dpr };
+  },
+
+  drawBackground() {
+    const ctx = this.ctx;
+    ctx.fillStyle = CONFIG.COLOR.BG;
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+  },
+
+  drawBoard() {
+    const ctx = this.ctx, o = this.origin();
+
+    // 可建造格子：极淡填充 + 网格线
+    ctx.fillStyle = CONFIG.BOARD.GRID_FILL;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      if (OBSTACLE_SET.has(x + ',' + y)) continue;
+      ctx.fillRect(o.x + x * o.c, o.y + y * o.c, o.c, o.c);
+    }
+    ctx.strokeStyle = CONFIG.BOARD.GRID_LINE;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < N; i++) {
+      ctx.moveTo(o.x + i * o.c, o.y); ctx.lineTo(o.x + i * o.c, o.y + N * o.c);
+      ctx.moveTo(o.x, o.y + i * o.c); ctx.lineTo(o.x + N * o.c, o.y + i * o.c);
+    }
+    ctx.stroke();
+
+    // 固定障碍
+    ctx.fillStyle = CONFIG.BOARD.OBSTACLE;
+    for (const [x, y] of CONFIG.BOARD.OBSTACLES) {
+      ctx.fillRect(o.x + x * o.c + 1, o.y + y * o.c + 1, o.c - 2, o.c - 2);
+    }
+
+    // 起终点 3×3 禁建区暗色标记
+    ctx.fillStyle = CONFIG.BOARD.FORBIDDEN_FILL;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      if (inForbiddenZone(x, y) && !(x === 0 && y === 12) && !(x === 23 && y === 12)) {
+        ctx.fillRect(o.x + x * o.c, o.y + y * o.c, o.c, o.c);
+      }
+    }
+
+    // 起点 / 终点
+    const s = this.cellToPx(CONFIG.BOARD.START[0], CONFIG.BOARD.START[1]);
+    const e = this.cellToPx(CONFIG.BOARD.END[0], CONFIG.BOARD.END[1]);
+    ctx.fillStyle = CONFIG.COLOR.START;
+    ctx.fillRect(s.x - o.c / 2, s.y - o.c / 2, o.c, o.c);
+    ctx.fillStyle = CONFIG.COLOR.END;
+    ctx.fillRect(e.x - o.c / 2, e.y - o.c / 2, o.c, o.c);
+
+    // 起点/终点标签：白字 + 彩色圆角底（区分），白字不再用颜色本身
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const pill = (cx, cy, label, bg) => {
+      const w = 38;
+      roundRect(ctx, cx - w / 2, cy - o.c - 22, w, 18, 9);
+      ctx.fillStyle = bg; ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '12px sans-serif';
+      ctx.fillText(label, cx, cy - o.c - 13);
+    };
+    pill(s.x, s.y, '起点', CONFIG.COLOR.START);
+    pill(e.x, e.y, '终点', CONFIG.COLOR.END);
+    // 终点上方 ♥ × N（白字），数字随变化缩放
+    const scale = 1 + 0.6 * GameState.livesPulse;
+    ctx.save();
+    ctx.translate(e.x, e.y - o.c - 40);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillText('♥ × ' + GameState.lives, 0, 0);
+    ctx.restore();
+  },
+
+  drawArrows() {
+    // 起点三个方向箭头；下一波方向在出发前 2 秒脉冲闪烁
+    const ctx = this.ctx, o = this.origin();
+    const s = this.cellToPx(CONFIG.BOARD.START[0], CONFIG.BOARD.START[1]);
+    const pulseActive = !GameState.spawning && GameState.wave < CONFIG.WAVES.COUNT && GameState.waveTimer <= 2;
+    const tri = 5;   // 三角边长
+    const offset = o.c * 0.75;
+    const dirs = {
+      up:    { x: s.x, y: s.y - offset, dx: 0, dy: -1 },
+      down:  { x: s.x, y: s.y + offset, dx: 0, dy: 1 },
+      right: { x: s.x + offset, y: s.y, dx: 1, dy: 0 }
+    };
+    for (const dir of DIR_ORDER) {
+      const d = dirs[dir];
+      const active = (dir === GameState.nextDirection);
+      let a = 0.45;
+      let sz = 1;
+      if (active && pulseActive) { const k = 0.5 + 0.5 * Math.sin(GameState.time * 12); a = 0.5 + 0.5 * k; sz = 1 + 0.35 * k; }
+      ctx.save();
+      ctx.translate(d.x, d.y);
+      ctx.scale(sz, sz);
+      ctx.fillStyle = CONFIG.COLOR.ARROW;
+      ctx.globalAlpha = active ? 0.9 : a;
+      ctx.beginPath();
+      if (dir === 'up') { ctx.moveTo(0, -tri); ctx.lineTo(-tri * 0.7, tri * 0.7); ctx.lineTo(tri * 0.7, tri * 0.7); }
+      else if (dir === 'down') { ctx.moveTo(0, tri); ctx.lineTo(-tri * 0.7, -tri * 0.7); ctx.lineTo(tri * 0.7, -tri * 0.7); }
+      else { ctx.moveTo(tri, 0); ctx.lineTo(-tri * 0.7, -tri * 0.7); ctx.lineTo(-tri * 0.7, tri * 0.7); }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  },
+
+  drawTowers() {
+    const ctx = this.ctx, o = this.origin();
+    const ROMAN = ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ'];
+    const ts = Math.min(CONFIG.TOWER_SIZE, o.c - 4);
+    for (const t of GameState.towers) {
+      const p = this.cellToPx(t.cell[0], t.cell[1]);
+      const type = TOWER_TYPES[t.type];
+      // 悬停显示射程
+      if (GameState.hoverCell && GameState.hoverCell[0] === t.cell[0] && GameState.hoverCell[1] === t.cell[1]) {
+        const range = Tower.stats(t).range * o.c;
+        ctx.beginPath(); ctx.arc(p.x, p.y, range, 0, Math.PI * 2);
+        ctx.fillStyle = CONFIG.RANGE_FILL; ctx.fill();
+        ctx.strokeStyle = CONFIG.RANGE_STROKE; ctx.lineWidth = 1; ctx.stroke();
+      }
+      // 方形塔（圆角），占满格子
+      roundRect(ctx, p.x - ts / 2, p.y - ts / 2, ts, ts, 4);
+      ctx.fillStyle = type.color; ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 1.5; ctx.stroke();
+      // 等级标记（画在方形中央）
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(ROMAN[t.level], p.x, p.y + 1);
+    }
+  },
+
+  drawEnemies() {
+    const ctx = this.ctx, o = this.origin();
+    for (const e of GameState.enemies) {
+      if (!e.alive || e.reached) continue;
+      const p = Enemy.pos(e);
+      const px = o.x + (p.x + 0.5) * o.c, py = o.y + (p.y + 0.5) * o.c;
+      const slowed = e.slowT > 0;
+      // 冰霜光环
+      if (slowed) {
+        ctx.beginPath(); ctx.arc(px, py, CONFIG.ENEMY_R + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = CONFIG.COLOR.FROST + '0.5)'; ctx.lineWidth = 2; ctx.stroke();
+      }
+      ctx.beginPath(); ctx.arc(px, py, CONFIG.ENEMY_R, 0, Math.PI * 2);
+      ctx.fillStyle = slowed ? CONFIG.COLOR.ENEMY_SLOWED : CONFIG.COLOR.ENEMY;
+      ctx.fill();
+      // 血条
+      const bw = 18, bh = 3;
+      const ratio = clamp(e.hp / e.maxHp, 0, 1);
+      ctx.fillStyle = '#333';
+      ctx.fillRect(px - bw / 2, py - CONFIG.ENEMY_R - 7, bw, bh);
+      ctx.fillStyle = ratio > 0.5 ? '#7dff7d' : (ratio > 0.25 ? '#ffd75e' : '#ff6b6b');
+      ctx.fillRect(px - bw / 2, py - CONFIG.ENEMY_R - 7, bw * ratio, bh);
+    }
+  },
+
+  drawFrosts() {
+    const ctx = this.ctx, o = this.origin();
+    for (const f of GameState.frosts) {
+      const k = f.t / f.dur;   // 0..1 扩散
+      const px = o.x + (f.x + 0.5) * o.c, py = o.y + (f.y + 0.5) * o.c;
+      const r = 4 + k * o.c * 0.9;
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.strokeStyle = CONFIG.COLOR.FROST + (0.7 * (1 - k)).toFixed(3) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  },
+
+  drawProjectiles() {
+    const ctx = this.ctx, o = this.origin();
+    for (const p of GameState.projectiles) {
+      const k = clamp(p.t / p.dur, 0, 1);
+      const fx = o.x + (p.from.x + 0.5) * o.c, fy = o.y + (p.from.y + 0.5) * o.c;
+      const tx = o.x + (p.to.x + 0.5) * o.c, ty = o.y + (p.to.y + 0.5) * o.c;
+      const x = lerp(fx, tx, k), y = lerp(fy, ty, k);
+      if (p.type === 'arrow') {
+        // 白色短线，指向飞行方向
+        const ang = Math.atan2(ty - fy, tx - fx);
+        ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(6, 0); ctx.stroke();
+        ctx.restore();
+      } else if (p.type === 'ice') {
+        // 青色小圆 + 拖尾
+        const ang = Math.atan2(ty - fy, tx - fx);
+        ctx.strokeStyle = CONFIG.COLOR.FROST + '0.4)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x - Math.cos(ang) * 10, y - Math.sin(ang) * 10); ctx.lineTo(x, y); ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#4affd4'; ctx.fill();
+      } else {
+        // 炮塔：橙色大圆 + 抛物线
+        const h = Math.sin(Math.PI * k) * 0.5 * o.c;
+        ctx.beginPath(); ctx.arc(x, y - h, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff9a3c'; ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+    }
+  },
+
+  drawPath() {
+    const live = GameState.enemies.filter(e => e.alive && !e.reached);
+    const ctx = this.ctx, o = this.origin();
+    const drawPolyline = (pts, color) => {
+      if (!pts || pts.length < 2) return;
+      ctx.save();
+      ctx.setLineDash([5, 5]);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(o.x + (pts[0].x + 0.5) * o.c, o.y + (pts[0].y + 0.5) * o.c);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(o.x + (pts[i].x + 0.5) * o.c, o.y + (pts[i].y + 0.5) * o.c);
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    if (live.length) {
+      // 多条路径分色显示（按出发方向分组，白/黄/青循环）
+      let ci = 0;
+      for (const dir of DIR_ORDER) {
+        const group = live.filter(e => e.dir === dir);
+        if (!group.length) continue;
+        const advanced = group.reduce((a, b) => (b.seg + b.t > a.seg + a.t ? b : a), group[0]);
+        const pts = [Enemy.pos(advanced)];
+        for (let i = advanced.seg + 1; i < advanced.path.length; i++) pts.push({ x: advanced.path[i][0], y: advanced.path[i][1] });
+        drawPolyline(pts, CONFIG.COLOR.ROUTE[ci % CONFIG.COLOR.ROUTE.length]);
+        ci++;
+        if (ci >= 4) break;
+      }
+    } else if (GameState.phase === 'PLAY' && GameState.wave < CONFIG.WAVES.COUNT) {
+      // 无敌人：显示从出发方向入口格到终点的 BFS 路径预览（白色虚线，alpha 0.3）
+      const route = GameState.routes[GameState.nextDirection];
+      if (route && route.length >= 2) drawPolyline(route.slice(1), 'rgba(255,255,255,0.3)');
+    }
+  },
+
+  drawHUD() {
+    const ctx = this.ctx;
+    ctx.textBaseline = 'middle';
+    const L = CONFIG.LAYOUT.HUD_H;
+    ctx.fillStyle = '#15151d';
+    ctx.fillRect(0, 0, CONFIG.WORLD.W, L);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, L); ctx.lineTo(CONFIG.WORLD.W, L); ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.font = '16px sans-serif';
+    ctx.fillStyle = CONFIG.COLOR.TEXT;
+    ctx.fillText('$ ' + GameState.gold, 20, L / 2 + 2);
+    ctx.fillText('♥ ' + GameState.lives, 150, L / 2 + 2);
+    ctx.fillText('第 ' + GameState.wave + ' / ' + CONFIG.WAVES.COUNT + ' 波', 250, L / 2 + 2);
+    ctx.fillStyle = CONFIG.COLOR.TEXT_DIM;
+    ctx.fillText(GameState.spawning
+      ? '出怪中 ' + (GameState.countForWave(GameState.wave) - GameState.spawnLeft) + '/' + GameState.countForWave(GameState.wave)
+      : (GameState.wave < CONFIG.WAVES.COUNT ? '下一波 ' + Math.ceil(GameState.waveTimer) + 's' : '—'), 400, L / 2 + 2);
+
+    const u = this.ui();
+    this.drawButton(u.callEarly, '提前召唤', !GameState.spawning && GameState.wave < CONFIG.WAVES.COUNT && GameState.phase === 'PLAY');
+    this.drawButton(u.pause, GameState.paused ? '继续' : '暂停', GameState.phase === 'PLAY');
+  },
+
+  drawButton(rect, label, enabled) {
+    const ctx = this.ctx;
+    const hover = enabled && this._inRect(rect);
+    ctx.fillStyle = enabled ? (hover ? CONFIG.COLOR.BUTTON_HOVER : CONFIG.COLOR.BUTTON) : CONFIG.COLOR.BUTTON_DISABLED;
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8);
+    ctx.fill();
+    ctx.fillStyle = enabled ? CONFIG.COLOR.TEXT : '#555';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  },
+
+  _inRect(rect) {
+    return rect && this._mouse && this._mouse.x >= rect.x && this._mouse.x <= rect.x + rect.w &&
+           this._mouse.y >= rect.y && this._mouse.y <= rect.y + rect.h;
+  },
+
+  drawMenu() {
+    if (!GameState.menu) return;
+    const ctx = this.ctx;
+    const m = this.layoutMenu(GameState.menu);
+    ctx.fillStyle = 'rgba(22,22,30,0.97)';
+    roundRect(ctx, m.x, m.y, m.w, m.h, 8);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1; ctx.stroke();
+
+    // 标题 + 信息行（塔信息面板）
+    let cy = m.y + 16;
+    if (m.title) {
+      ctx.fillStyle = CONFIG.COLOR.TEXT;
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(m.title, m.x + m.w / 2, cy);
+      cy += 20;
+    }
+    for (const s of m.stats) {
+      ctx.fillStyle = CONFIG.COLOR.TEXT_DIM;
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(s.label, m.x + 14, cy);
+      ctx.fillStyle = CONFIG.COLOR.TEXT;
+      ctx.textAlign = 'right';
+      ctx.fillText(s.value, m.x + m.w - 14, cy);
+      cy += 19;
+    }
+
+    // 按钮
+    for (const b of m.buttons) {
+      const enabled = !b.it.disabled;
+      const hover = enabled && this._inRect({ x: b.x, y: b.y, w: b.w, h: b.h });
+      ctx.fillStyle = enabled ? (hover ? CONFIG.COLOR.BUTTON_HOVER : CONFIG.COLOR.BUTTON) : CONFIG.COLOR.BUTTON_DISABLED;
+      roundRect(ctx, b.x, b.y, b.w, b.h, 6);
+      ctx.fill();
+      ctx.fillStyle = enabled ? CONFIG.COLOR.TEXT : '#555';
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      let label = b.it.label;
+      if (b.it.cost) label += '  ' + b.it.cost;
+      if (b.it.gain) label += '  +' + b.it.cost;
+      ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2);
+    }
+  },
+
+  drawHint() {
+    const ctx = this.ctx;
+    ctx.fillStyle = CONFIG.COLOR.HINT;
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('右键选塔 · 左键确认 · ESC 暂停', CONFIG.WORLD.W / 2, CONFIG.WORLD.H - CONFIG.LAYOUT.HINT_H / 2);
+  },
+
+  drawToast() {
+    if (!GameState.toast) return;
+    const ctx = this.ctx;
+    const a = GameState.toastT < 1.0 ? 1 : clamp(1.4 - GameState.toastT, 0, 1) / 0.4;
+    ctx.fillStyle = 'rgba(255,90,90,' + a.toFixed(3) + ')';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(GameState.toast, CONFIG.WORLD.W / 2, CONFIG.WORLD.H / 2 - 60);
+  },
+
+  drawFloaters() {
+    const ctx = this.ctx;
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    for (const f of GameState.floaters) {
+      const a = 1 - f.t / 0.5;
+      ctx.fillStyle = CONFIG.COLOR.GAIN;
+      ctx.globalAlpha = clamp(a, 0, 1);
+      ctx.fillText(f.text, f.x, f.y - f.t * 30);
+    }
+    ctx.globalAlpha = 1;
+  },
+
+  drawOverlay() {
+    const ctx = this.ctx;
+    const C = { x: CONFIG.WORLD.W / 2, y: CONFIG.WORLD.H / 2 };
+    ctx.fillStyle = 'rgba(10,10,16,0.72)';
+    ctx.fillRect(0, 0, CONFIG.WORLD.W, CONFIG.WORLD.H);
+
+    if (GameState.phase === 'MENU') {
+      this._title('极简塔防', C.x, 260);
+      this._subtitle('选择难度', C.x, 330);
+      const u = this.ui();
+      u.diff.forEach((r, i) => {
+        const k = Object.keys(CONFIG.DIFFICULTIES)[i];
+        this.drawButton(r, CONFIG.DIFFICULTIES[k].name + '  ·  ' + CONFIG.DIFFICULTIES[k].lives + ' 血', true);
+      });
+    } else if (GameState.phase === 'WIN' || GameState.phase === 'LOSE') {
+      this._title(GameState.phase === 'WIN' ? '胜利' : '失败', C.x, 360);
+      this._subtitle(GameState.phase === 'WIN' ? '撑过了全部 20 波' : '终点生命耗尽', C.x, 420);
+      const u = this.ui();
+      this.drawButton(u.end, '重新开始', true);
+    } else if (GameState.paused) {
+      this._title('已暂停', C.x, 340);
+      const u = this.ui();
+      const labels = ['继续', '重新开始', '切换难度'];
+      u.pauseItems.forEach((r, i) => this.drawButton(r, labels[i], true));
+    }
+  },
+
+  _title(text, x, y) {
+    const ctx = this.ctx;
+    ctx.fillStyle = CONFIG.COLOR.TEXT;
+    ctx.font = '600 40px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, x, y);
+  },
+  _subtitle(text, x, y) {
+    const ctx = this.ctx;
+    ctx.fillStyle = CONFIG.COLOR.TEXT_DIM;
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, x, y);
+  },
+
+  /* ---------- 交互热区 ---------- */
+  ui() {
+    const u = { callEarly: { x: 700, y: 14, w: 130, h: 36 }, pause: { x: 840, y: 14, w: 100, h: 36 },
+               diff: [], pauseItems: [], end: null, menuButtons: [] };
+    if (GameState.phase === 'MENU') {
+      const C = CONFIG.WORLD.W / 2, w = 220, h = 48, gap = 14;
+      u.diff = Object.keys(CONFIG.DIFFICULTIES).map((k, i) => ({ x: C - w / 2, y: 380 + i * (h + gap), w, h }));
+    }
+    if (GameState.paused && GameState.phase === 'PLAY') {
+      const C = CONFIG.WORLD.W / 2, w = 220, h = 46, gap = 12;
+      u.pauseItems = [0, 1, 2].map(i => ({ x: C - w / 2, y: 400 + i * (h + gap), w, h }));
+    }
+    if (GameState.phase === 'WIN' || GameState.phase === 'LOSE') {
+      u.end = { x: CONFIG.WORLD.W / 2 - 110, y: 470, w: 220, h: 48 };
+    }
+    if (GameState.menu) u.menuButtons = this.layoutMenu(GameState.menu).buttons;
+    return u;
+  },
+
+  layoutMenu(menu) {
+    const ctx = this.ctx;
+    const o = this.origin();
+    let title = null, stats = [];
+
+    if (menu.kind === 'build') {
+      stats = TOWER_KEYS.map(k => ({ label: TOWER_TYPES[k].name, value: '' + TOWER_TYPES[k].baseCost }));
+    } else {
+      const t = menu.tower;
+      const st = Tower.stats(t);
+      title = TOWER_TYPES[t.type].name + ' ' + ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ'][t.level];
+      stats = [
+        { label: '攻击', value: '' + st.damage },
+        { label: '射程', value: '' + st.range },
+        { label: '冷却', value: st.cooldown + 's' }
+      ];
+      if (t.type === 'ice') stats.push({ label: '减速', value: Math.round(st.slow * 100) + '% / ' + st.slowDur + 's' });
+      if (t.type === 'cannon') stats.push({ label: '溅射', value: st.splash + ' 格' });
+    }
+
+    const actions = menuActions(menu);
+    const w = menu.kind === 'tower' ? 190 : 150;
+    const headH = (title ? 20 : 0) + 8;
+    const statsH = stats.length * 19;
+    const btnH = 32;
+    const pad = 8;
+    const h = headH + statsH + btnH + pad * 2;
+
+    let px = o.x + (menu.cell[0] + 0.5) * o.c;
+    let py = o.y + (menu.cell[1] + 0.5) * o.c + o.c;
+    px = clamp(px, 8, CONFIG.WORLD.W - w - 8);
+    py = clamp(py, CONFIG.LAYOUT.HUD_H + 4, CONFIG.WORLD.H - h - 4);
+
+    // 按钮排布：build 纵向一排；tower 横向两个（升级/拆除）
+    let buttons;
+    if (menu.kind === 'tower') {
+      const bw = (w - pad * 2 - 6) / 2;
+      buttons = actions.map((it, i) => ({ it, x: px + pad + i * (bw + 6), y: py + h - pad - btnH, w: bw, h: btnH }));
+    } else {
+      buttons = actions.map((it, i) => ({ it, x: px + pad, y: py + headH + statsH + i * 26, w: w - pad * 2, h: 24 }));
+    }
+    return { x: px, y: py, w, h, title, stats, buttons };
+  },
+
+  render() {
+    const ctx = this.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.drawBackground();
+
+    const v = this.view;
+    ctx.setTransform(v.dpr * v.scale, 0, 0, v.dpr * v.scale, v.dpr * v.ox, v.dpr * v.oy);
+
+    if (GameState.phase === 'MENU') {
+      this.drawBoard();
+      this.drawOverlay();
+      return;
+    }
+
+    this.drawBoard();
+    this.drawPath();
+    this.drawArrows();
+    this.drawTowers();
+    this.drawFrosts();
+    this.drawEnemies();
+    this.drawProjectiles();
+    this.drawFloaters();
+    this.drawHUD();
+    this.drawHint();
+    this.drawMenu();
+    this.drawToast();
+    this.drawOverlay();
+  }
+};
+
+/* 菜单可点击动作（build：三塔；tower：升级/拆除） */
+function menuActions(menu) {
+  if (menu.kind === 'build') {
+    return TOWER_KEYS.map(k => ({
+      kind: 'build', typeKey: k, label: TOWER_TYPES[k].name, cost: TOWER_TYPES[k].baseCost,
+      color: TOWER_TYPES[k].color, disabled: GameState.gold < TOWER_TYPES[k].baseCost
+    }));
+  }
+  const t = menu.tower;
+  const up = Tower.upgradeCost(t);
+  return [
+    { kind: 'upgrade', label: '升级', cost: up === Infinity ? 0 : up, disabled: t.level >= MAX_LEVEL || GameState.gold < up },
+    { kind: 'demolish', label: '拆除', cost: Tower.refundValue(t), gain: true, disabled: false }
+  ];
+}
+
+/* ============================== 7. Input ============================== */
+const Input = {
+  bind() {
+    const c = Renderer.canvas;
+    c.addEventListener('pointerdown', e => this._onDown(e));
+    c.addEventListener('pointermove', e => this._onMove(e));
+    window.addEventListener('keydown', e => this._onKey(e));
+    c.addEventListener('contextmenu', e => e.preventDefault());
+    window.addEventListener('resize', () => Renderer.resize());
+  },
+
+  _onMove(e) {
+    const w = Renderer.screenToWorld(e.clientX, e.clientY);
+    Renderer._mouse = w;
+    GameState.hoverCell = Renderer.pxToCell(w.x, w.y);
+  },
+
+  _onKey(e) {
+    if (e.key === 'Escape' || e.key === 'p' || e.key === 'P') {
+      if (GameState.phase === 'PLAY') { GameState.paused = !GameState.paused; GameState.menu = null; }
+      e.preventDefault();
+    }
+  },
+
+  _onDown(e) {
+    const w = Renderer.screenToWorld(e.clientX, e.clientY);
+    if (e.button === 2) return this._right(w);
+    if (e.button === 0) this._left(w);
+  },
+
+  _left(w) {
+    const u = Renderer.ui();
+    if (GameState.phase === 'MENU') {
+      const i = hitIndex(u.diff, w);
+      if (i >= 0) GameState.start(Object.keys(CONFIG.DIFFICULTIES)[i]);
+      return;
+    }
+    if (GameState.phase === 'WIN' || GameState.phase === 'LOSE') {
+      if (u.end && hit(u.end, w)) GameState.restart();
+      return;
+    }
+    if (GameState.paused) {
+      const i = hitIndex(u.pauseItems, w);
+      if (i === 0) GameState.paused = false;
+      else if (i === 1) GameState.restart();
+      else if (i === 2) { GameState.paused = false; GameState.phase = 'MENU'; }
+      return;
+    }
+    if (GameState.menu) {
+      const i = hitIndex(u.menuButtons.map(b => ({ x: b.x, y: b.y, w: b.w, h: b.h })), w);
+      if (i >= 0) {
+        const it = u.menuButtons[i].it;
+        if (!it.disabled) {
+          if (it.kind === 'build') GameState.placeTower(it.typeKey, GameState.menu.cell);
+          else if (it.kind === 'upgrade') GameState.upgradeTower(GameState.menu.tower);
+          else if (it.kind === 'demolish') GameState.demolishTower(GameState.menu.tower);
+        }
+      }
+      GameState.menu = null;
+      return;
+    }
+    if (GameState.phase === 'PLAY') {
+      if (hit(u.callEarly, w)) GameState.callEarlyWave();
+      else if (hit(u.pause, w)) GameState.paused = true;
+    }
+  },
+
+  _right(w) {
+    if (GameState.phase !== 'PLAY' || GameState.paused) { GameState.menu = null; return; }
+    const cell = Renderer.pxToCell(w.x, w.y);
+    if (!cell) { GameState.menu = null; return; }
+    const tower = GameState.towers.find(t => t.cell[0] === cell[0] && t.cell[1] === cell[1]);
+    if (tower) { GameState.menu = { kind: 'tower', cell, tower }; return; }
+    if (OBSTACLE_SET.has(cell[0] + ',' + cell[1])) { GameState.showToast('障碍不可建造'); GameState.menu = null; return; }
+    if (inForbiddenZone(cell[0], cell[1])) { GameState.showToast('起点/终点附近不可建造'); GameState.menu = null; return; }
+    GameState.menu = { kind: 'build', cell };
+  }
+};
+
+function hit(rect, p) { return rect && p.x >= rect.x && p.x <= rect.x + rect.w && p.y >= rect.y && p.y <= rect.y + rect.h; }
+function hitIndex(rects, p) { for (let i = 0; i < rects.length; i++) if (hit(rects[i], p)) return i; return -1; }
+
+/* ============================== 8. GameLoop ============================== */
+const GameLoop = {
+  running: false, _last: 0,
+  frame(now) {
+    const dt = Math.min((now - this._last) / 1000, 0.05);
+    this._last = now;
+    GameState.update(dt);
+    Renderer.render();
+    if (this.running) requestAnimationFrame(t => this.frame(t));
+  },
+  start() {
+    if (this.running) return;
+    this.running = true;
+    this._last = performance.now();
+    requestAnimationFrame(t => this.frame(t));
+  }
+};
+
+/* ============================== 9. 启动 ============================== */
+Renderer.canvas = document.getElementById('stage');
+Renderer.ctx = Renderer.canvas.getContext('2d');
+Renderer.resize();
+GameState.phase = 'MENU';
+Input.bind();
+GameLoop.start();
+</script>
+</body>
+</html>
